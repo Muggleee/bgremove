@@ -16,9 +16,74 @@ import numpy as np
 from PIL import Image
 from rembg import remove
 from tqdm import tqdm
+from scipy import ndimage
 
 
-def process_video(input_path: str, output_path: str, model: str = "u2net"):
+def clean_edge(image: Image.Image, erode_size: int = 1, decontaminate: bool = False) -> Image.Image:
+    """
+    清理抠图边缘的颜色溢出
+    
+    Args:
+        image: 带透明通道的 PIL Image (RGBA)
+        erode_size: 边缘收缩像素数
+        decontaminate: 是否进行颜色净化
+    
+    Returns:
+        处理后的图像
+    """
+    # 转换为 numpy 数组
+    img_array = np.array(image)
+    
+    if img_array.shape[2] != 4:
+        return image  # 没有 alpha 通道，直接返回
+    
+    rgb = img_array[:, :, :3].astype(np.float32)
+    alpha = img_array[:, :, 3].astype(np.float32)
+    
+    # 阶段1：边缘收缩（腐蚀 alpha 通道）
+    if erode_size > 0:
+        # 创建腐蚀核
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erode_size * 2 + 1, erode_size * 2 + 1))
+        # 对 alpha 通道进行腐蚀
+        alpha_eroded = cv2.erode(alpha, kernel, iterations=1)
+        alpha = alpha_eroded
+    
+    # 阶段2：颜色净化
+    if decontaminate:
+        # 找到边缘区域（半透明像素）
+        edge_mask = (alpha > 0) & (alpha < 255)
+        
+        # 找到完全不透明的区域
+        opaque_mask = alpha >= 250
+        
+        if np.any(edge_mask) and np.any(opaque_mask):
+            # 对每个颜色通道进行处理
+            for c in range(3):
+                channel = rgb[:, :, c]
+                
+                # 用最近的不透明像素颜色填充边缘
+                # 创建一个只包含不透明区域颜色的图像
+                opaque_colors = np.where(opaque_mask, channel, 0)
+                
+                # 使用距离变换找到最近的不透明像素
+                dist, indices = ndimage.distance_transform_edt(~opaque_mask, return_indices=True)
+                
+                # 用最近不透明像素的颜色替换边缘颜色
+                nearest_colors = channel[indices[0], indices[1]]
+                
+                # 只在边缘区域替换颜色
+                rgb[:, :, c] = np.where(edge_mask, nearest_colors, channel)
+    
+    # 合并结果
+    result = np.zeros_like(img_array)
+    result[:, :, :3] = np.clip(rgb, 0, 255).astype(np.uint8)
+    result[:, :, 3] = np.clip(alpha, 0, 255).astype(np.uint8)
+    
+    return Image.fromarray(result)
+
+
+def process_video(input_path: str, output_path: str, model: str = "u2net", debug: bool = False,
+                  edge_clean: bool = False, erode_size: int = 1, decontaminate: bool = False):
     """
     处理视频，去除背景
     
@@ -26,6 +91,10 @@ def process_video(input_path: str, output_path: str, model: str = "u2net"):
         input_path: 输入视频路径
         output_path: 输出视频路径
         model: rembg 模型名称
+        debug: 调试模式，只处理第一帧并输出 PNG
+        edge_clean: 是否清理边缘
+        erode_size: 边缘收缩像素数
+        decontaminate: 是否进行颜色净化
     """
     # 打开视频
     cap = cv2.VideoCapture(input_path)
@@ -44,6 +113,38 @@ def process_video(input_path: str, output_path: str, model: str = "u2net"):
     print(f"  帧率: {fps}")
     print(f"  总帧数: {total_frames}")
     print(f"  使用模型: {model}")
+    if edge_clean or erode_size > 0 or decontaminate:
+        print(f"  边缘处理: erode={erode_size}px, decontaminate={decontaminate}")
+    if debug:
+        print(f"  调试模式: 只处理第一帧")
+    
+    # 调试模式：只处理第一帧
+    if debug:
+        ret, frame = cap.read()
+        if not ret:
+            print("错误: 无法读取视频帧")
+            cap.release()
+            sys.exit(1)
+        
+        # BGR 转 RGB
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        pil_image = Image.fromarray(frame_rgb)
+        
+        print("\n正在处理第一帧...")
+        # 去除背景
+        result = remove(pil_image, session_name=model)
+        
+        # 边缘清理
+        if edge_clean or erode_size > 0 or decontaminate:
+            result = clean_edge(result, erode_size=erode_size, decontaminate=decontaminate)
+        
+        # 保存为 PNG
+        debug_output = output_path if output_path.endswith(".png") else str(Path(output_path).with_suffix(".png"))
+        result.save(debug_output)
+        
+        cap.release()
+        print(f"\n调试完成! 输出文件: {debug_output}")
+        return
     
     # 创建临时目录存放帧
     temp_dir = tempfile.mkdtemp()
@@ -67,6 +168,10 @@ def process_video(input_path: str, output_path: str, model: str = "u2net"):
                 
                 # 去除背景
                 result = remove(pil_image, session_name=model)
+                
+                # 边缘清理
+                if edge_clean or erode_size > 0 or decontaminate:
+                    result = clean_edge(result, erode_size=erode_size, decontaminate=decontaminate)
                 
                 # 保存为 PNG（保留透明通道）
                 output_frame_path = os.path.join(frames_dir, f"frame_{frame_idx:06d}.png")
@@ -135,6 +240,27 @@ def main():
         default="u2net",
         choices=["u2net", "u2netp", "u2net_human_seg", "u2net_cloth_seg", "silueta", "isnet-general-use", "isnet-anime"]
     )
+    parser.add_argument(
+        "-d", "--debug",
+        help="调试模式：只处理第一帧并输出 PNG",
+        action="store_true"
+    )
+    parser.add_argument(
+        "--edge-clean",
+        help="启用边缘清理（默认: erode=1 + decontaminate）",
+        action="store_true"
+    )
+    parser.add_argument(
+        "--erode",
+        help="边缘收缩像素数 (默认: 1)",
+        type=int,
+        default=0
+    )
+    parser.add_argument(
+        "--decontaminate",
+        help="启用颜色净化，去除边缘颜色溢出",
+        action="store_true"
+    )
     
     args = parser.parse_args()
     
@@ -146,9 +272,24 @@ def main():
     # 设置输出路径
     if args.output is None:
         input_path = Path(args.input)
-        args.output = str(input_path.parent / f"{input_path.stem}_nobg.webm")
+        if args.debug:
+            args.output = str(input_path.parent / f"{input_path.stem}_debug.png")
+        else:
+            args.output = str(input_path.parent / f"{input_path.stem}_nobg.webm")
     
-    process_video(args.input, args.output, args.model)
+    # 处理 edge_clean 默认参数：--edge-clean 默认启用 erode=1 + decontaminate
+    erode_size = args.erode if args.erode > 0 else (1 if args.edge_clean else 0)
+    decontaminate = args.decontaminate or args.edge_clean
+    
+    process_video(
+        args.input, 
+        args.output, 
+        args.model, 
+        args.debug,
+        edge_clean=args.edge_clean,
+        erode_size=erode_size,
+        decontaminate=decontaminate
+    )
 
 
 if __name__ == "__main__":
