@@ -474,8 +474,8 @@ def main():
         default=None
     )
     parser.add_argument(
-        "--scale-before",
-        help="在抠图前缩放 (加快处理速度，但可能影响抠图质量)",
+        "--scale-after",
+        help="在抠图后缩放 (默认在抠图前缩放以加快速度)",
         action="store_true"
     )
     parser.add_argument(
@@ -518,7 +518,7 @@ def main():
         scale=args.scale,
         width=args.width,
         height=args.height,
-        scale_before=args.scale_before,
+        scale_before=not args.scale_after,
         interpolation=args.interpolation
     )
 
