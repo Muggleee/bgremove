@@ -19,6 +19,73 @@ from tqdm import tqdm
 from scipy import ndimage
 
 
+def despill_green(image: Image.Image, strength: float = 1.0, method: str = "average") -> Image.Image:
+    """
+    去除绿幕溢色（Green Spill Removal）
+    
+    Args:
+        image: 带透明通道的 PIL Image (RGBA)
+        strength: 去溢色强度 (0.0-1.0)
+        method: 去溢色方法
+            - "average": 用红蓝通道平均值替换绿色溢出
+            - "max": 用红蓝通道最大值限制绿色
+    
+    Returns:
+        处理后的图像
+    """
+    img_array = np.array(image)
+    
+    if len(img_array.shape) < 3:
+        return image
+    
+    # 分离通道
+    if img_array.shape[2] == 4:
+        r, g, b, a = img_array[:, :, 0], img_array[:, :, 1], img_array[:, :, 2], img_array[:, :, 3]
+        has_alpha = True
+    else:
+        r, g, b = img_array[:, :, 0], img_array[:, :, 1], img_array[:, :, 2]
+        a = None
+        has_alpha = False
+    
+    # 转换为 float 进行计算
+    r = r.astype(np.float32)
+    g = g.astype(np.float32)
+    b = b.astype(np.float32)
+    
+    if method == "average":
+        # 方法1：用红蓝平均值替换绿色溢出部分
+        # 计算绿色溢出量：绿色超过红蓝平均值的部分
+        rb_avg = (r + b) / 2
+        spill = np.maximum(g - rb_avg, 0)
+        
+        # 按强度去除溢色
+        g_new = g - spill * strength
+        
+    elif method == "max":
+        # 方法2：限制绿色不超过红蓝最大值
+        rb_max = np.maximum(r, b)
+        spill = np.maximum(g - rb_max, 0)
+        
+        # 按强度去除溢色
+        g_new = g - spill * strength
+    
+    else:
+        g_new = g
+    
+    # 确保值在有效范围内
+    g_new = np.clip(g_new, 0, 255).astype(np.uint8)
+    r = np.clip(r, 0, 255).astype(np.uint8)
+    b = np.clip(b, 0, 255).astype(np.uint8)
+    
+    # 重新组合图像
+    if has_alpha:
+        result = np.stack([r, g_new, b, a], axis=2)
+    else:
+        result = np.stack([r, g_new, b], axis=2)
+    
+    return Image.fromarray(result)
+
+
 def clean_edge(image: Image.Image, erode_size: int = 1, decontaminate: bool = False) -> Image.Image:
     """
     清理抠图边缘的颜色溢出
@@ -83,7 +150,8 @@ def clean_edge(image: Image.Image, erode_size: int = 1, decontaminate: bool = Fa
 
 
 def process_video(input_path: str, output_path: str, model: str = "u2net", debug: bool = False,
-                  edge_clean: bool = False, erode_size: int = 1, decontaminate: bool = False):
+                  edge_clean: bool = False, erode_size: int = 1, decontaminate: bool = False,
+                  despill: bool = False, spill_strength: float = 1.0, spill_method: str = "average"):
     """
     处理视频，去除背景
     
@@ -95,6 +163,9 @@ def process_video(input_path: str, output_path: str, model: str = "u2net", debug
         edge_clean: 是否清理边缘
         erode_size: 边缘收缩像素数
         decontaminate: 是否进行颜色净化
+        despill: 是否去除绿溢色
+        spill_strength: 去绿溢色强度
+        spill_method: 去绿溢色方法
     """
     # 打开视频
     cap = cv2.VideoCapture(input_path)
@@ -113,6 +184,8 @@ def process_video(input_path: str, output_path: str, model: str = "u2net", debug
     print(f"  帧率: {fps}")
     print(f"  总帧数: {total_frames}")
     print(f"  使用模型: {model}")
+    if despill:
+        print(f"  去绿溢色: strength={spill_strength}, method={spill_method}")
     if edge_clean or erode_size > 0 or decontaminate:
         print(f"  边缘处理: erode={erode_size}px, decontaminate={decontaminate}")
     if debug:
@@ -133,6 +206,10 @@ def process_video(input_path: str, output_path: str, model: str = "u2net", debug
         print("\n正在处理第一帧...")
         # 去除背景
         result = remove(pil_image, session_name=model)
+        
+        # 去绿溢色（在边缘清理之前）
+        if despill:
+            result = despill_green(result, strength=spill_strength, method=spill_method)
         
         # 边缘清理
         if edge_clean or erode_size > 0 or decontaminate:
@@ -168,6 +245,10 @@ def process_video(input_path: str, output_path: str, model: str = "u2net", debug
                 
                 # 去除背景
                 result = remove(pil_image, session_name=model)
+                
+                # 去绿溢色（在边缘清理之前）
+                if despill:
+                    result = despill_green(result, strength=spill_strength, method=spill_method)
                 
                 # 边缘清理
                 if edge_clean or erode_size > 0 or decontaminate:
@@ -261,6 +342,23 @@ def main():
         help="启用颜色净化，去除边缘颜色溢出",
         action="store_true"
     )
+    parser.add_argument(
+        "--despill",
+        help="启用去绿溢色，去除主体上的绿幕反光",
+        action="store_true"
+    )
+    parser.add_argument(
+        "--spill-strength",
+        help="去绿溢色强度 (0.0-1.0, 默认: 1.0)",
+        type=float,
+        default=1.0
+    )
+    parser.add_argument(
+        "--spill-method",
+        help="去绿溢色方法 (默认: average)",
+        default="average",
+        choices=["average", "max"]
+    )
     
     args = parser.parse_args()
     
@@ -288,7 +386,10 @@ def main():
         args.debug,
         edge_clean=args.edge_clean,
         erode_size=erode_size,
-        decontaminate=decontaminate
+        decontaminate=decontaminate,
+        despill=args.despill,
+        spill_strength=args.spill_strength,
+        spill_method=args.spill_method
     )
 
 
