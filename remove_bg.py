@@ -9,6 +9,7 @@ import os
 import sys
 import tempfile
 import shutil
+import subprocess
 from pathlib import Path
 
 import cv2
@@ -26,6 +27,9 @@ INTERPOLATION_METHODS = {
     "cubic": Image.Resampling.BICUBIC,
     "lanczos": Image.Resampling.LANCZOS,
 }
+
+# 默认 PAGConvertor 路径
+DEFAULT_PAG_TOOL = "/Users/liziyang/Downloads/PAGConvertor/PAGConvertor"
 
 
 def resize_image(image: Image.Image, scale: float = None, width: int = None, height: int = None,
@@ -209,7 +213,8 @@ def process_video(input_path: str, output_path: str, model: str = "u2net", debug
                   edge_clean: bool = False, erode_size: int = 1, decontaminate: bool = False,
                   despill: bool = False, spill_strength: float = 1.0, spill_method: str = "average",
                   scale: float = None, width: int = None, height: int = None,
-                  scale_before: bool = False, interpolation: str = "cubic"):
+                  scale_before: bool = False, interpolation: str = "cubic",
+                  output_pag: bool = False, pag_tool: str = None, keep_frames: bool = False):
     """
     处理视频，去除背景
     
@@ -229,6 +234,9 @@ def process_video(input_path: str, output_path: str, model: str = "u2net", debug
         height: 目标高度
         scale_before: 是否在抠图前缩放
         interpolation: 插值算法
+        output_pag: 是否输出 PAG 文件
+        pag_tool: PAGConvertor 工具路径
+        keep_frames: 是否保留 PNG 序列帧
     """
     # 打开视频
     cap = cv2.VideoCapture(input_path)
@@ -269,6 +277,10 @@ def process_video(input_path: str, output_path: str, model: str = "u2net", debug
         print(f"  边缘处理: erode={erode_size}px, decontaminate={decontaminate}")
     if debug:
         print(f"  调试模式: 只处理第一帧")
+    if output_pag:
+        print(f"  输出 PAG: {pag_tool or DEFAULT_PAG_TOOL}")
+    if keep_frames:
+        print(f"  保留序列帧: 是")
     
     # 调试模式：只处理第一帧
     if debug:
@@ -359,39 +371,85 @@ def process_video(input_path: str, output_path: str, model: str = "u2net", debug
         
         cap.release()
         
-        # 使用 ffmpeg 合成视频（支持透明通道）
-        print("\n正在合成视频...")
-        
-        # 输出为 WebM (VP9) 或 MOV (ProRes) 格式以支持透明
+        # 判断输出格式
         output_ext = Path(output_path).suffix.lower()
+        output_video = output_ext not in [".pag"]  # 是否需要输出视频
         
-        if output_ext == ".webm":
-            # WebM with VP9 (支持透明)
-            ffmpeg_cmd = (
-                f'ffmpeg -y -framerate {fps} -i "{frames_dir}/frame_%06d.png" '
-                f'-c:v libvpx-vp9 -pix_fmt yuva420p -b:v 2M '
-                f'"{output_path}"'
-            )
-        elif output_ext == ".mov":
-            # MOV with ProRes 4444 (支持透明)
-            ffmpeg_cmd = (
-                f'ffmpeg -y -framerate {fps} -i "{frames_dir}/frame_%06d.png" '
-                f'-c:v prores_ks -profile:v 4444 -pix_fmt yuva444p10le '
-                f'"{output_path}"'
-            )
-        else:
-            # 默认输出 WebM
-            if not output_path.endswith(".webm"):
-                output_path = str(Path(output_path).with_suffix(".webm"))
-            ffmpeg_cmd = (
-                f'ffmpeg -y -framerate {fps} -i "{frames_dir}/frame_%06d.png" '
-                f'-c:v libvpx-vp9 -pix_fmt yuva420p -b:v 2M '
-                f'"{output_path}"'
-            )
+        # 使用 ffmpeg 合成视频（支持透明通道）
+        if output_video:
+            print("\n正在合成视频...")
+            
+            # 输出为 WebM (VP9) 或 MOV (ProRes) 格式以支持透明
+            if output_ext == ".webm":
+                # WebM with VP9 (支持透明)
+                ffmpeg_cmd = (
+                    f'ffmpeg -y -framerate {fps} -i "{frames_dir}/frame_%06d.png" '
+                    f'-c:v libvpx-vp9 -pix_fmt yuva420p -b:v 2M '
+                    f'"{output_path}"'
+                )
+            elif output_ext == ".mov":
+                # MOV with ProRes 4444 (支持透明)
+                ffmpeg_cmd = (
+                    f'ffmpeg -y -framerate {fps} -i "{frames_dir}/frame_%06d.png" '
+                    f'-c:v prores_ks -profile:v 4444 -pix_fmt yuva444p10le '
+                    f'"{output_path}"'
+                )
+            else:
+                # 默认输出 WebM
+                if not output_path.endswith(".webm"):
+                    output_path = str(Path(output_path).with_suffix(".webm"))
+                ffmpeg_cmd = (
+                    f'ffmpeg -y -framerate {fps} -i "{frames_dir}/frame_%06d.png" '
+                    f'-c:v libvpx-vp9 -pix_fmt yuva420p -b:v 2M '
+                    f'"{output_path}"'
+                )
+            
+            os.system(ffmpeg_cmd)
+            print(f"视频输出: {output_path}")
         
-        os.system(ffmpeg_cmd)
+        # PAG 转换
+        if output_pag or output_ext == ".pag":
+            print("\n正在转换 PAG...")
+            pag_converter = pag_tool or DEFAULT_PAG_TOOL
+            
+            # 检查 PAGConvertor 是否存在
+            if not os.path.exists(pag_converter):
+                print(f"错误: PAGConvertor 不存在: {pag_converter}")
+                print("请下载 PAGConvertor 并指定路径: --pag-tool <path>")
+            else:
+                # PAGConvertor 用法: PAGConvertor <序列帧文件夹> <帧率>
+                pag_output = str(Path(output_path).with_suffix(".pag"))
+                
+                try:
+                    result = subprocess.run(
+                        [pag_converter, frames_dir, str(int(fps))],
+                        capture_output=True,
+                        text=True
+                    )
+                    
+                    # PAGConvertor 会在 frames_dir 同级目录生成 frames.pag
+                    generated_pag = os.path.join(temp_dir, "frames.pag")
+                    
+                    if os.path.exists(generated_pag):
+                        # 移动到目标位置
+                        shutil.move(generated_pag, pag_output)
+                        print(f"PAG 输出: {pag_output}")
+                    else:
+                        print(f"警告: PAG 文件未生成")
+                        if result.stderr:
+                            print(f"错误信息: {result.stderr}")
+                except Exception as e:
+                    print(f"PAG 转换失败: {e}")
         
-        print(f"\n完成! 输出文件: {output_path}")
+        # 保留序列帧
+        if keep_frames:
+            frames_output = str(Path(output_path).with_suffix("")) + "_frames"
+            if os.path.exists(frames_output):
+                shutil.rmtree(frames_output)
+            shutil.copytree(frames_dir, frames_output)
+            print(f"序列帧输出: {frames_output}/")
+        
+        print(f"\n完成!")
         
     finally:
         # 清理临时文件
@@ -484,6 +542,21 @@ def main():
         default="cubic",
         choices=["nearest", "linear", "cubic", "lanczos"]
     )
+    parser.add_argument(
+        "--pag",
+        help="输出 PAG 格式",
+        action="store_true"
+    )
+    parser.add_argument(
+        "--pag-tool",
+        help=f"PAGConvertor 路径 (默认: {DEFAULT_PAG_TOOL})",
+        default=None
+    )
+    parser.add_argument(
+        "--keep-frames",
+        help="保留 PNG 序列帧",
+        action="store_true"
+    )
     
     args = parser.parse_args()
     
@@ -497,6 +570,9 @@ def main():
         input_path = Path(args.input)
         if args.debug:
             args.output = str(input_path.parent / f"{input_path.stem}_debug.png")
+        elif args.pag and not args.keep_frames:
+            # 只输出 PAG 时，默认扩展名为 .pag
+            args.output = str(input_path.parent / f"{input_path.stem}_nobg.pag")
         else:
             args.output = str(input_path.parent / f"{input_path.stem}_nobg.webm")
     
@@ -519,7 +595,10 @@ def main():
         width=args.width,
         height=args.height,
         scale_before=not args.scale_after,
-        interpolation=args.interpolation
+        interpolation=args.interpolation,
+        output_pag=args.pag,
+        pag_tool=args.pag_tool,
+        keep_frames=args.keep_frames
     )
 
 
