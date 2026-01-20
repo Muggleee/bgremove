@@ -19,6 +19,62 @@ from tqdm import tqdm
 from scipy import ndimage
 
 
+# 插值算法映射
+INTERPOLATION_METHODS = {
+    "nearest": Image.Resampling.NEAREST,
+    "linear": Image.Resampling.BILINEAR,
+    "cubic": Image.Resampling.BICUBIC,
+    "lanczos": Image.Resampling.LANCZOS,
+}
+
+
+def resize_image(image: Image.Image, scale: float = None, width: int = None, height: int = None,
+                 interpolation: str = "cubic") -> Image.Image:
+    """
+    调整图像分辨率
+    
+    Args:
+        image: PIL Image
+        scale: 缩放比例 (如 0.5 = 缩小一半, 2.0 = 放大两倍)
+        width: 目标宽度 (如果只指定宽度，高度按比例计算)
+        height: 目标高度 (如果只指定高度，宽度按比例计算)
+        interpolation: 插值算法 (nearest/linear/cubic/lanczos)
+    
+    Returns:
+        缩放后的图像
+    """
+    orig_width, orig_height = image.size
+    
+    # 获取插值方法
+    resample = INTERPOLATION_METHODS.get(interpolation, Image.Resampling.BICUBIC)
+    
+    # 计算目标尺寸
+    if scale is not None:
+        new_width = int(orig_width * scale)
+        new_height = int(orig_height * scale)
+    elif width is not None and height is not None:
+        # 同时指定宽高，可能变形
+        new_width = width
+        new_height = height
+    elif width is not None:
+        # 只指定宽度，保持宽高比
+        new_width = width
+        new_height = int(orig_height * (width / orig_width))
+    elif height is not None:
+        # 只指定高度，保持宽高比
+        new_height = height
+        new_width = int(orig_width * (height / orig_height))
+    else:
+        # 没有指定任何缩放参数，返回原图
+        return image
+    
+    # 确保尺寸至少为1
+    new_width = max(1, new_width)
+    new_height = max(1, new_height)
+    
+    return image.resize((new_width, new_height), resample=resample)
+
+
 def despill_green(image: Image.Image, strength: float = 1.0, method: str = "average") -> Image.Image:
     """
     去除绿幕溢色（Green Spill Removal）
@@ -151,7 +207,9 @@ def clean_edge(image: Image.Image, erode_size: int = 1, decontaminate: bool = Fa
 
 def process_video(input_path: str, output_path: str, model: str = "u2net", debug: bool = False,
                   edge_clean: bool = False, erode_size: int = 1, decontaminate: bool = False,
-                  despill: bool = False, spill_strength: float = 1.0, spill_method: str = "average"):
+                  despill: bool = False, spill_strength: float = 1.0, spill_method: str = "average",
+                  scale: float = None, width: int = None, height: int = None,
+                  scale_before: bool = False, interpolation: str = "cubic"):
     """
     处理视频，去除背景
     
@@ -166,6 +224,11 @@ def process_video(input_path: str, output_path: str, model: str = "u2net", debug
         despill: 是否去除绿溢色
         spill_strength: 去绿溢色强度
         spill_method: 去绿溢色方法
+        scale: 缩放比例
+        width: 目标宽度
+        height: 目标高度
+        scale_before: 是否在抠图前缩放
+        interpolation: 插值算法
     """
     # 打开视频
     cap = cv2.VideoCapture(input_path)
@@ -175,15 +238,31 @@ def process_video(input_path: str, output_path: str, model: str = "u2net", debug
     
     # 获取视频属性
     fps = cap.get(cv2.CAP_PROP_FPS)
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    width_orig = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height_orig = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
+    # 判断是否需要缩放
+    need_resize = scale is not None or width is not None or height is not None
+    
     print(f"视频信息:")
-    print(f"  分辨率: {width}x{height}")
+    print(f"  分辨率: {width_orig}x{height_orig}")
     print(f"  帧率: {fps}")
     print(f"  总帧数: {total_frames}")
     print(f"  使用模型: {model}")
+    if need_resize:
+        # 计算目标尺寸用于显示
+        if scale is not None:
+            target_w, target_h = int(width_orig * scale), int(height_orig * scale)
+        elif width is not None and height is not None:
+            target_w, target_h = width, height
+        elif width is not None:
+            target_w = width
+            target_h = int(height_orig * (width / width_orig))
+        else:
+            target_h = height
+            target_w = int(width_orig * (height / height_orig))
+        print(f"  缩放: {width_orig}x{height_orig} → {target_w}x{target_h} ({'抠图前' if scale_before else '抠图后'}, {interpolation})")
     if despill:
         print(f"  去绿溢色: strength={spill_strength}, method={spill_method}")
     if edge_clean or erode_size > 0 or decontaminate:
@@ -204,6 +283,11 @@ def process_video(input_path: str, output_path: str, model: str = "u2net", debug
         pil_image = Image.fromarray(frame_rgb)
         
         print("\n正在处理第一帧...")
+        
+        # 抠图前缩放
+        if need_resize and scale_before:
+            pil_image = resize_image(pil_image, scale=scale, width=width, height=height, interpolation=interpolation)
+        
         # 去除背景
         result = remove(pil_image, session_name=model)
         
@@ -214,6 +298,10 @@ def process_video(input_path: str, output_path: str, model: str = "u2net", debug
         # 边缘清理
         if edge_clean or erode_size > 0 or decontaminate:
             result = clean_edge(result, erode_size=erode_size, decontaminate=decontaminate)
+        
+        # 抠图后缩放
+        if need_resize and not scale_before:
+            result = resize_image(result, scale=scale, width=width, height=height, interpolation=interpolation)
         
         # 保存为 PNG
         debug_output = output_path if output_path.endswith(".png") else str(Path(output_path).with_suffix(".png"))
@@ -243,6 +331,10 @@ def process_video(input_path: str, output_path: str, model: str = "u2net", debug
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 pil_image = Image.fromarray(frame_rgb)
                 
+                # 抠图前缩放
+                if need_resize and scale_before:
+                    pil_image = resize_image(pil_image, scale=scale, width=width, height=height, interpolation=interpolation)
+                
                 # 去除背景
                 result = remove(pil_image, session_name=model)
                 
@@ -253,6 +345,10 @@ def process_video(input_path: str, output_path: str, model: str = "u2net", debug
                 # 边缘清理
                 if edge_clean or erode_size > 0 or decontaminate:
                     result = clean_edge(result, erode_size=erode_size, decontaminate=decontaminate)
+                
+                # 抠图后缩放
+                if need_resize and not scale_before:
+                    result = resize_image(result, scale=scale, width=width, height=height, interpolation=interpolation)
                 
                 # 保存为 PNG（保留透明通道）
                 output_frame_path = os.path.join(frames_dir, f"frame_{frame_idx:06d}.png")
@@ -355,9 +451,38 @@ def main():
     )
     parser.add_argument(
         "--spill-method",
-        help="去绿溢色方法 (默认: average)",
-        default="average",
+        help="去绿溢色方法 (默认: max)",
+        default="max",
         choices=["average", "max"]
+    )
+    parser.add_argument(
+        "--scale",
+        help="缩放比例 (如 0.5=缩小一半, 2.0=放大两倍)",
+        type=float,
+        default=None
+    )
+    parser.add_argument(
+        "--width",
+        help="输出宽度 (高度按比例计算，除非同时指定 --height)",
+        type=int,
+        default=None
+    )
+    parser.add_argument(
+        "--height",
+        help="输出高度 (宽度按比例计算，除非同时指定 --width)",
+        type=int,
+        default=None
+    )
+    parser.add_argument(
+        "--scale-before",
+        help="在抠图前缩放 (加快处理速度，但可能影响抠图质量)",
+        action="store_true"
+    )
+    parser.add_argument(
+        "--interpolation",
+        help="缩放插值算法 (默认: cubic)",
+        default="cubic",
+        choices=["nearest", "linear", "cubic", "lanczos"]
     )
     
     args = parser.parse_args()
@@ -389,7 +514,12 @@ def main():
         decontaminate=decontaminate,
         despill=args.despill,
         spill_strength=args.spill_strength,
-        spill_method=args.spill_method
+        spill_method=args.spill_method,
+        scale=args.scale,
+        width=args.width,
+        height=args.height,
+        scale_before=args.scale_before,
+        interpolation=args.interpolation
     )
 
 

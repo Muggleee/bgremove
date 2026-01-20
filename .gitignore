@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 .DS_Store
 output.log
+output/
 *.egg-info/
 dist/
 build/
