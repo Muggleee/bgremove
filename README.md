@@ -7,6 +7,7 @@
 - 基于 [rembg](https://github.com/danielgatis/rembg) 的 AI 背景去除
 - 支持多种 AI 模型（通用、人像优化、动漫风格等）
 - 输出 WebM (VP9) 或 MOV (ProRes 4444) 格式，支持透明通道
+- **PAG 输出**：支持导出腾讯 PAG 动画格式
 - 边缘清理：去除抠图后的边缘杂色
 - 去绿溢色：处理绿幕拍摄的反光问题
 - 分辨率调整：支持抠图前/后缩放
@@ -110,11 +111,32 @@ python remove_bg.py --height 720 --interpolation lanczos input/video.mp4
 
 插值算法：`nearest`、`linear`、`cubic`（默认）、`lanczos`
 
+### PAG 输出
+
+将处理后的序列帧转换为 PAG 格式（需要 PAGConvertor 工具）：
+
+```bash
+# 输出 PAG 格式
+python remove_bg.py --pag input/video.mp4 -o output/result.pag
+
+# 同时输出视频和 PAG
+python remove_bg.py --pag input/video.mp4 -o output/result.webm
+
+# 保留 PNG 序列帧
+python remove_bg.py --pag --keep-frames input/video.mp4 -o output/result.pag
+
+# 指定 PAGConvertor 路径
+python remove_bg.py --pag --pag-tool /path/to/PAGConvertor input/video.mp4
+```
+
 ### 组合使用
 
 ```bash
 # 完整处理流程：缩放 + 去溢色 + 边缘清理
 python remove_bg.py --height 720 --despill --edge-clean input/video.mp4 -o output/result.webm
+
+# 输出 PAG + 完整处理
+python remove_bg.py --pag --height 300 --despill --edge-clean input/video.mp4 -o output/result.pag
 
 # 调试预览
 python remove_bg.py -d --height 720 --despill --edge-clean input/video.mp4 -o preview.png
@@ -136,6 +158,7 @@ python remove_bg.py -d --height 720 --despill --edge-clean input/video.mp4 -o pr
 
 - `.webm` - VP9 编码，支持透明（推荐，文件较小）
 - `.mov` - ProRes 4444 编码，支持透明（高质量，文件较大）
+- `.pag` - 腾讯 PAG 动画格式（需要 PAGConvertor）
 
 ## 完整参数列表
 
@@ -166,12 +189,18 @@ python remove_bg.py [选项] 输入文件
   --height N           输出高度
   --scale-after        在抠图后缩放 (默认抠图前)
   --interpolation M    插值算法: nearest|linear|cubic|lanczos (默认: cubic)
+
+PAG 输出:
+  --pag                输出 PAG 格式
+  --pag-tool PATH      PAGConvertor 路径
+  --keep-frames        保留 PNG 序列帧
 ```
 
 ## 依赖
 
 - Python 3.8+
 - FFmpeg（需要安装在系统中）
+- PAGConvertor（可选，用于 PAG 输出）：[下载地址](https://pag.qq.com/)
 - rembg
 - opencv-python-headless
 - numpy
